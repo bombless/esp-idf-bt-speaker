@@ -3,6 +3,7 @@
  *
  * SPDX-License-Identifier: Unlicense OR CC0-1.0
  */
+#include <math.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -59,6 +60,36 @@ enum {
     APP_AV_MEDIA_STATE_STARTED,
     APP_AV_MEDIA_STATE_STOPPING,
 };
+
+// 音阶频率定义 (C大调，A4=440Hz标准)
+#define NOTE_C4 261.63f  // Do
+#define NOTE_D4 293.66f  // Re
+#define NOTE_E4 329.63f  // Mi
+#define NOTE_F4 349.23f  // Fa
+#define NOTE_G4 392.00f  // So
+#define NOTE_A4 440.00f  // La
+#define NOTE_B4 493.88f  // Si
+#define NOTE_C5 523.25f  // 高音Do
+
+// 音频参数
+#define SAMPLE_RATE 44100  // 采样率 44.1kHz
+#define AMPLITUDE 16000    // 振幅 (避免削波，小于32767)
+#define NOTE_DURATION_MS 500  // 每个音符持续时间(毫秒)
+
+// 音阶序列
+const float g_note_frequencies[] = {
+    NOTE_C4, NOTE_D4, NOTE_E4, NOTE_F4, NOTE_G4, NOTE_A4, NOTE_B4, NOTE_C5
+};
+const int g_note_count = sizeof(g_note_frequencies) / sizeof(g_note_frequencies[0]);
+
+
+// 音频生成相关变量
+static int g_current_note_index = 0;      // 当前播放的音符索引
+static float g_phase = 0.0f;               // 当前相位
+static const float TWO_PI = 6.28318530718f; // 2π
+static int g_samples_per_note = (SAMPLE_RATE * NOTE_DURATION_MS) / 1000; // 每个音符的采样数
+static int g_samples_played = 0;            // 当前音符已播放的采样数
+static float g_phase_increment = 0.0f;      // 相位增量
 
 /*********************************
  * STATIC FUNCTION DECLARATIONS
@@ -357,7 +388,6 @@ static void bt_app_a2d_cb(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param)
     bt_app_work_dispatch(bt_app_av_sm_hdlr, event, param, sizeof(esp_a2d_cb_param_t), NULL);
 }
 
-/* generate some random noise to simulate source audio */
 static int32_t bt_app_a2d_data_cb(uint8_t *data, int32_t len)
 {
     if (data == NULL || len < 0) {
@@ -365,10 +395,43 @@ static int32_t bt_app_a2d_data_cb(uint8_t *data, int32_t len)
     }
 
     int16_t *p_buf = (int16_t *)data;
-    for (int i = 0; i < (len >> 1); i++) {
-        p_buf[i] = rand() % (1 << 16);
+    int samples_to_generate = len / sizeof(int16_t);  // 16位采样，所以除以2
+    
+    // 假设是立体声，左右声道相同
+    for (int i = 0; i < samples_to_generate; i += 2) {
+        // 检查是否需要切换到下一个音符
+        if (g_samples_played >= g_samples_per_note) {
+            g_current_note_index = (g_current_note_index + 1) % g_note_count;
+            g_samples_played = 0;
+            
+            // 计算新音符的相位增量
+            float frequency = g_note_frequencies[g_current_note_index];
+            g_phase_increment = TWO_PI * frequency / SAMPLE_RATE;
+            
+            ESP_LOGI(BT_AV_TAG, "Playing note %d, frequency: %.2f Hz", 
+                     g_current_note_index, frequency);
+        }
+        
+        // 生成正弦波采样
+        float sample_value = AMPLITUDE * sinf(g_phase);
+        
+        // 转换为16位整数
+        int16_t int_sample = (int16_t)sample_value;
+        
+        // 左右声道输出相同的值
+        p_buf[i] = int_sample;      // 左声道
+        p_buf[i + 1] = int_sample;  // 右声道
+        
+        // 更新相位和采样计数
+        g_phase += g_phase_increment;
+        g_samples_played++;
+        
+        // 防止相位溢出
+        if (g_phase >= TWO_PI) {
+            g_phase -= TWO_PI;
+        }
     }
-
+    
     return len;
 }
 
@@ -491,6 +554,18 @@ static void bt_app_av_media_proc(uint16_t event, void *param)
             if (a2d->media_ctrl_stat.cmd == ESP_A2D_MEDIA_CTRL_CHECK_SRC_RDY &&
                     a2d->media_ctrl_stat.status == ESP_A2D_MEDIA_CTRL_ACK_SUCCESS) {
                 ESP_LOGI(BT_AV_TAG, "a2dp media ready, starting ...");
+                
+                // 初始化音频参数
+                g_current_note_index = 0;
+                g_phase = 0.0f;
+                g_samples_played = 0;
+                g_samples_per_note = (SAMPLE_RATE * NOTE_DURATION_MS) / 1000;
+                
+                // 设置初始频率 (Do)
+                g_phase_increment = TWO_PI * g_note_frequencies[0] / SAMPLE_RATE;
+                
+                ESP_LOGI(BT_AV_TAG, "Starting to play scale: Do Re Mi Fa So La Si Do");
+                
                 esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_START);
                 s_media_state = APP_AV_MEDIA_STATE_STARTING;
             }
